@@ -1,6 +1,18 @@
 import { IsString, IsNotEmpty, IsArray, IsOptional, ValidateNested, IsIn } from 'class-validator';
 import { Type } from 'class-transformer';
 
+export type SupportedLanguage = 'english' | 'japanese' | 'korean' | 'chinese' | 'french' | 'german' | 'spanish';
+
+export const SUPPORTED_LANGUAGES: SupportedLanguage[] = [
+  'english',
+  'japanese',
+  'korean',
+  'chinese',
+  'french',
+  'german',
+  'spanish',
+];
+
 export class ChatMessageData {
   @IsOptional()
   @IsString()
@@ -9,6 +21,10 @@ export class ChatMessageData {
   @IsOptional()
   @IsString()
   correction?: string;
+
+  @IsOptional()
+  @IsString()
+  correctionPronunciation?: string;
 
   @IsOptional()
   @IsString()
@@ -24,11 +40,18 @@ export class ChatMessageData {
 }
 
 export class ChatMessage {
+  @IsOptional()
+  @IsString()
+  id?: string;
+
   @IsIn(['user', 'assistant'])
   role: 'user' | 'assistant';
 
   @IsString()
   content: string;
+
+  @IsOptional()
+  timestamp?: number;
 
   @IsOptional()
   @ValidateNested()
@@ -42,6 +65,10 @@ export class SendMessageDto {
   message: string;
 
   @IsOptional()
+  @IsIn(SUPPORTED_LANGUAGES)
+  targetLanguage?: SupportedLanguage;
+
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ChatMessage)
@@ -51,6 +78,7 @@ export class SendMessageDto {
 export class ChatResponseData {
   original: string;
   correction: string;
+  correctionPronunciation: string;
   explanation: string;
   reply: string;
   pronunciation: string;

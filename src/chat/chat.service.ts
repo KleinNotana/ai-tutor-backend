@@ -1,7 +1,156 @@
 import { Injectable, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { ChatMessage, ChatResponseDto } from './dto/chat.dto';
+import { ChatMessage, ChatResponseDto, SupportedLanguage } from './dto/chat.dto';
+
+interface LanguageConfig {
+  name: string;
+  nativeName: string;
+  tutorDescription: string;
+  pronunciationSystem: string;
+  pronunciationExample: string;
+  exampleOriginal: string;
+  exampleCorrection: string;
+  exampleCorrectionPronunciation: string;
+  exampleExplanation: string;
+  exampleReply: string;
+  examplePronunciation: string;
+  specialRules: string[];
+}
+
+const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
+  english: {
+    name: 'English',
+    nativeName: 'English',
+    tutorDescription: 'a professional British/American English speaking tutor',
+    pronunciationSystem: 'IPA (International Phonetic Alphabet) with American English symbols',
+    pronunciationExample: '/ɡreɪt ˈɛfərt!/',
+    exampleOriginal: 'I go to school yesterday',
+    exampleCorrection: 'I went to school yesterday',
+    exampleCorrectionPronunciation: '/aɪ wɛnt tu skul ˈjɛstərˌdeɪ/',
+    exampleExplanation: "We use 'went' (past tense) because 'yesterday' indicates a past time.",
+    exampleReply: "Great effort! You're talking about the past, so we use 'went' instead of 'go'. Can you tell me more about what you did at school yesterday?",
+    examplePronunciation: '/ɡreɪt ˈɛfərt! jʊr ˈtɔkɪŋ əˈbaʊt ðə pæst/',
+    specialRules: [
+      'Use primary stress mark ˈ before stressed syllables',
+      'Focus on common pronunciation mistakes for non-native speakers',
+    ],
+  },
+  japanese: {
+    name: 'Japanese',
+    nativeName: '日本語',
+    tutorDescription: 'a professional Japanese language tutor (日本語の先生)',
+    pronunciationSystem: 'Romaji with pitch accent markers (High: ꜛ, Low: ꜜ) and Hiragana reading',
+    pronunciationExample: 'すꜛごꜜい (sugoi)',
+    exampleOriginal: '昨日学校に行くました',
+    exampleCorrection: '昨日学校に行きました',
+    exampleCorrectionPronunciation: 'きꜛのꜜう がꜛっこꜜうに いꜛきまꜜした (kinou gakkou ni ikimashita)',
+    exampleExplanation: '「行く」の過去形は「行きました」です。「行くました」は文法的に正しくありません。',
+    exampleReply: 'いい調子ですね！過去形の練習をしましょう。昨日、学校で何をしましたか？',
+    examplePronunciation: 'いꜛいꜜ ちょꜛうしꜜ ですꜜね (ii choushi desu ne)',
+    specialRules: [
+      'Pay attention to particle usage (は, が, を, に, で, etc.)',
+      'Check verb conjugation forms (て形, た形, ます形)',
+      'Watch for keigo (敬語) politeness levels',
+      'Include both Hiragana reading and Romaji for pronunciation',
+    ],
+  },
+  korean: {
+    name: 'Korean',
+    nativeName: '한국어',
+    tutorDescription: 'a professional Korean language tutor (한국어 선생님)',
+    pronunciationSystem: 'Revised Romanization with Hangul',
+    pronunciationExample: '잘했어요 (jalhaesseoyo)',
+    exampleOriginal: '어제 학교에 가요',
+    exampleCorrection: '어제 학교에 갔어요',
+    exampleCorrectionPronunciation: '어제 학교에 갔어요 (eoje hakgyoe gasseoyo)',
+    exampleExplanation: "과거를 표현할 때는 '-았/었어요'를 사용합니다. '가요'는 현재형이에요.",
+    exampleReply: '잘하고 있어요! 과거형 연습을 해볼까요? 어제 학교에서 뭐 했어요?',
+    examplePronunciation: '잘하고 있어요 (jalhago isseoyo)',
+    specialRules: [
+      'Check for proper honorific levels (존댓말/반말)',
+      'Watch for particle usage (은/는, 이/가, 을/를)',
+      'Pay attention to verb conjugation (past, present, future)',
+      'Note pronunciation changes (연음, 경음화, etc.)',
+    ],
+  },
+  chinese: {
+    name: 'Chinese',
+    nativeName: '中文',
+    tutorDescription: 'a professional Mandarin Chinese tutor (中文老师)',
+    pronunciationSystem: 'Pinyin with tone marks (1: ā, 2: á, 3: ǎ, 4: à)',
+    pronunciationExample: 'hěn bàng! (很棒!)',
+    exampleOriginal: '我昨天去学校了',
+    exampleCorrection: '我昨天去学校了',
+    exampleCorrectionPronunciation: 'wǒ zuótiān qù xuéxiào le',
+    exampleExplanation: '这句话是正确的！"了"表示动作完成，用得很好。',
+    exampleReply: '说得很好！你的中文在进步。昨天在学校做了什么？',
+    examplePronunciation: 'shuō de hěn hǎo! nǐ de zhōngwén zài jìnbù.',
+    specialRules: [
+      'Always include tone marks in Pinyin',
+      'Check for measure word (量词) usage',
+      'Watch for aspect markers (了, 过, 着)',
+      'Pay attention to word order (SVO structure)',
+    ],
+  },
+  french: {
+    name: 'French',
+    nativeName: 'Français',
+    tutorDescription: 'a professional French language tutor (professeur de français)',
+    pronunciationSystem: 'IPA with French phonemes and liaison markers',
+    pronunciationExample: '/tʁɛ bjɛ̃/ (très bien)',
+    exampleOriginal: 'Je suis allé à école hier',
+    exampleCorrection: "Je suis allé à l'école hier",
+    exampleCorrectionPronunciation: "/ʒə sɥi‿ale a lekɔl jɛʁ/",
+    exampleExplanation: "On utilise l'article défini contracté \"l'\" devant \"école\" car le mot commence par une voyelle.",
+    exampleReply: "Très bien ! N'oubliez pas les articles. Qu'avez-vous fait à l'école hier ?",
+    examplePronunciation: "/tʁɛ bjɛ̃! nublije pa lez‿aʁtikl/",
+    specialRules: [
+      'Check for gender agreement (le/la, un/une)',
+      'Watch for verb conjugation and tense agreement',
+      'Note liaisons between words',
+      'Pay attention to accent marks (é, è, ê, ë, etc.)',
+    ],
+  },
+  german: {
+    name: 'German',
+    nativeName: 'Deutsch',
+    tutorDescription: 'a professional German language tutor (Deutschlehrer)',
+    pronunciationSystem: 'IPA with German phonemes',
+    pronunciationExample: '/zeːɐ̯ guːt/ (sehr gut)',
+    exampleOriginal: 'Ich bin gestern in die Schule gegangen',
+    exampleCorrection: 'Ich bin gestern in die Schule gegangen',
+    exampleCorrectionPronunciation: '/ɪç bɪn ˈɡɛstɐn ɪn diː ˈʃuːlə ɡəˈɡaŋən/',
+    exampleExplanation: 'Perfekt! Der Satz ist grammatikalisch korrekt. "Gegangen" ist das Partizip II von "gehen".',
+    exampleReply: 'Sehr gut! Dein Deutsch ist ausgezeichnet. Was hast du gestern in der Schule gemacht?',
+    examplePronunciation: '/zeːɐ̯ guːt! daɪn dɔʏtʃ ɪst ˈaʊsɡəˌtsaɪçnət/',
+    specialRules: [
+      'Check for correct case usage (Nominativ, Akkusativ, Dativ, Genitiv)',
+      'Watch for verb position in main and subordinate clauses',
+      'Pay attention to noun gender (der, die, das)',
+      'Note separable prefix verbs',
+    ],
+  },
+  spanish: {
+    name: 'Spanish',
+    nativeName: 'Español',
+    tutorDescription: 'a professional Spanish language tutor (profesor de español)',
+    pronunciationSystem: 'IPA with Spanish phonemes',
+    pronunciationExample: '/ˈmui ˈbjen/ (muy bien)',
+    exampleOriginal: 'Yo fui a la escuela ayer',
+    exampleCorrection: 'Ayer fui a la escuela',
+    exampleCorrectionPronunciation: '/aˈʝeɾ fwi a la esˈkwela/',
+    exampleExplanation: 'En español, es más natural poner el tiempo al principio. También, el pronombre "yo" es opcional porque el verbo ya indica la persona.',
+    exampleReply: '¡Muy bien! Tu español está mejorando. ¿Qué hiciste en la escuela ayer?',
+    examplePronunciation: '/ˈmui ˈbjen! tu espaˈɲol esˈta mexoˈɾando/',
+    specialRules: [
+      'Check for correct verb conjugation (especially irregular verbs)',
+      'Watch for ser vs estar usage',
+      'Pay attention to gender and number agreement',
+      'Note the use of subjunctive mood when appropriate',
+    ],
+  },
+};
 
 @Injectable()
 export class ChatService implements OnModuleInit {
@@ -20,40 +169,55 @@ export class ChatService implements OnModuleInit {
     this.logger.log('Gemini AI client initialized successfully');
   }
 
+  private getSystemPrompt(language: SupportedLanguage): string {
+    const config = LANGUAGE_CONFIGS[language];
+    
+    const specialRulesText = config.specialRules
+      .map((rule, index) => `${index + 8}. ${rule}`)
+      .join('\n');
+
+    return `You are ${config.tutorDescription}. Your role is to help students improve their ${config.name} (${config.nativeName}) speaking skills.
+
+When a student speaks, you must respond in a structured JSON format with the following fields:
+- original: The original text the student said (exactly as they said it)
+- correction: The corrected version if there are any grammar, pronunciation, or vocabulary mistakes
+- correctionPronunciation: ${config.pronunciationSystem} transcription of the CORRECTED sentence (this helps students practice the correct pronunciation)
+- explanation: A brief, friendly explanation of the correction (if any mistakes were found) - respond in ${config.name}
+- reply: Your natural, conversational reply as a tutor in ${config.name} (encourage the student, ask follow-up questions, or provide feedback)
+- pronunciation: ${config.pronunciationSystem} transcription of your reply
+
+IMPORTANT RULES:
+1. Always return valid JSON only, no additional text before or after
+2. If the student's ${config.name} is perfect, set "correction" to the same as "original" and "correctionPronunciation" to the pronunciation of the original
+3. Be encouraging and friendly in your "reply" - always respond in ${config.name}
+4. Focus on natural conversation flow in ${config.name}
+5. If the student makes multiple mistakes, correct the most important ones
+6. For pronunciation fields, always use ${config.pronunciationSystem}
+7. The "correctionPronunciation" field is REQUIRED - it helps students practice saying the sentence correctly
+${specialRulesText}
+
+Example response format:
+{
+  "original": "${config.exampleOriginal}",
+  "correction": "${config.exampleCorrection}",
+  "correctionPronunciation": "${config.exampleCorrectionPronunciation}",
+  "explanation": "${config.exampleExplanation}",
+  "reply": "${config.exampleReply}",
+  "pronunciation": "${config.examplePronunciation}"
+}`;
+  }
+
   async sendMessage(
     userMessage: string,
     chatHistory: ChatMessage[] = [],
+    targetLanguage: SupportedLanguage = 'english',
   ): Promise<ChatResponseDto> {
     try {
       const model = this.genAI.getGenerativeModel({
         model: 'gemini-2.0-flash',
       });
 
-      const systemPrompt = `You are a professional British/American English speaking tutor. Your role is to help students improve their English speaking skills.
-
-When a student speaks, you must respond in a structured JSON format with the following fields:
-- original: The original text the student said (exactly as they said it)
-- correction: The corrected version if there are any grammar, pronunciation, or vocabulary mistakes
-- explanation: A brief, friendly explanation of the correction (if any mistakes were found)
-- reply: Your natural, conversational reply as a tutor (encourage the student, ask follow-up questions, or provide feedback)
-- pronunciation: IPA (International Phonetic Alphabet) transcription of your reply using standard IPA symbols
-
-IMPORTANT RULES:
-1. Always return valid JSON only, no additional text before or after
-2. If the student's English is perfect, set "correction" to the same as "original" and "explanation" to an empty string
-3. Be encouraging and friendly in your "reply"
-4. Focus on natural conversation flow
-5. If the student makes multiple mistakes, correct the most important ones
-6. For pronunciation, use proper IPA notation with word boundaries separated by spaces. Use American English IPA symbols (e.g., /ɡreɪt/ for "great", /ˈɛfərt/ for "effort", with primary stress mark ˈ before the stressed syllable)
-
-Example response format:
-{
-  "original": "I go to school yesterday",
-  "correction": "I went to school yesterday",
-  "explanation": "We use 'went' (past tense) because 'yesterday' indicates a past time.",
-  "reply": "Great effort! You're talking about the past, so we use 'went' instead of 'go'. Can you tell me more about what you did at school yesterday?",
-  "pronunciation": "/ɡreɪt ˈɛfərt! jʊr ˈtɔkɪŋ əˈbaʊt ðə pæst, soʊ wi juz wɛnt ɪnˈstɛd əv ɡoʊ. kæn ju tɛl mi mɔr əˈbaʊt wʌt ju dɪd æt skul ˈjɛstərˌdeɪ?/"
-}`;
+      const systemPrompt = this.getSystemPrompt(targetLanguage);
 
       // Build conversation history context
       const recentHistory = chatHistory.slice(-10);
@@ -103,6 +267,7 @@ Example response format:
           data: {
             original: userMessage,
             correction: userMessage,
+            correctionPronunciation: '',
             explanation: '',
             reply: text,
             pronunciation: '',

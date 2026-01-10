@@ -1,6 +1,6 @@
 import { Controller, Post, Body, Get, Logger } from '@nestjs/common';
 import { ChatService } from './chat.service';
-import { SendMessageDto, ChatResponseDto } from './dto/chat.dto';
+import { SendMessageDto, ChatResponseDto, SUPPORTED_LANGUAGES } from './dto/chat.dto';
 
 @Controller('chat')
 export class ChatController {
@@ -17,9 +17,16 @@ export class ChatController {
     };
   }
 
+  @Get('languages')
+  getSupportedLanguages() {
+    return {
+      languages: SUPPORTED_LANGUAGES,
+    };
+  }
+
   @Post('send')
   async sendMessage(@Body() dto: SendMessageDto): Promise<ChatResponseDto> {
-    this.logger.log(`Received message: ${dto.message.substring(0, 50)}...`);
-    return this.chatService.sendMessage(dto.message, dto.chatHistory);
+    this.logger.log(`Received message: ${dto.message.substring(0, 50)}... [Language: ${dto.targetLanguage || 'english'}]`);
+    return this.chatService.sendMessage(dto.message, dto.chatHistory, dto.targetLanguage || 'english');
   }
 }
