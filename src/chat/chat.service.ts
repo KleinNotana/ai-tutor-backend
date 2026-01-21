@@ -154,9 +154,9 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
 
 // List of Gemini models to try in order (fallback mechanism)
 const GEMINI_MODELS = [
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
   'gemini-2.0-flash',
+  'gemini-3-flash-preview',
 ];
 
 @Injectable()
