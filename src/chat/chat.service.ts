@@ -152,10 +152,18 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
   },
 };
 
+// List of Gemini models to try in order (fallback mechanism)
+const GEMINI_MODELS = [
+  'gemini-3-flash-preview',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+];
+
 @Injectable()
 export class ChatService implements OnModuleInit {
   private readonly logger = new Logger(ChatService.name);
   private genAI: GoogleGenerativeAI;
+  private currentModelIndex = 0;
 
   constructor(private configService: ConfigService) {}
 
@@ -207,16 +215,63 @@ Example response format:
 }`;
   }
 
+  private isRateLimitError(error: Error): boolean {
+    const message = error.message?.toLowerCase() || '';
+    return (
+      message.includes('429') ||
+      message.includes('too many requests') ||
+      message.includes('resource exhausted') ||
+      message.includes('quota') ||
+      message.includes('rate limit')
+    );
+  }
+
+  private async generateWithFallback(prompt: string): Promise<string> {
+    const startIndex = this.currentModelIndex;
+    let lastError: Error | null = null;
+
+    // Try each model starting from current index
+    for (let i = 0; i < GEMINI_MODELS.length; i++) {
+      const modelIndex = (startIndex + i) % GEMINI_MODELS.length;
+      const modelName = GEMINI_MODELS[modelIndex];
+
+      try {
+        this.logger.log(`Trying model: ${modelName}`);
+        const model = this.genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+
+        // Success! Update current model index for next request
+        this.currentModelIndex = modelIndex;
+        this.logger.log(`Successfully got response from model: ${modelName}`);
+        return text;
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`Model ${modelName} failed: ${error.message}`);
+
+        if (this.isRateLimitError(error)) {
+          // Move to next model
+          this.logger.log(`Rate limit hit on ${modelName}, trying next model...`);
+          continue;
+        }
+
+        // For non-rate-limit errors, throw immediately
+        throw error;
+      }
+    }
+
+    // All models failed
+    this.logger.error('All Gemini models exhausted');
+    throw lastError || new Error('All Gemini models are unavailable');
+  }
+
   async sendMessage(
     userMessage: string,
     chatHistory: ChatMessage[] = [],
     targetLanguage: SupportedLanguage = 'english',
   ): Promise<ChatResponseDto> {
     try {
-      const model = this.genAI.getGenerativeModel({
-        model: 'gemini-2.0-flash',
-      });
-
       const systemPrompt = this.getSystemPrompt(targetLanguage);
 
       // Build conversation history context
@@ -240,9 +295,8 @@ Example response format:
 
       this.logger.debug(`Sending message to Gemini: ${userMessage.substring(0, 50)}...`);
       
-      const result = await model.generateContent(fullPrompt);
-      const response = await result.response;
-      const text = response.text();
+      // Use fallback mechanism to get response
+      const text = await this.generateWithFallback(fullPrompt);
 
       // Parse JSON response
       try {
@@ -284,9 +338,9 @@ Example response format:
         );
       }
 
-      if (error.message?.includes('quota') || error.message?.includes('limit')) {
+      if (this.isRateLimitError(error)) {
         throw new HttpException(
-          'API quota exceeded. Please try again later.',
+          'All AI models are currently rate limited. Please try again later.',
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }
