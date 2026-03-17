@@ -69,6 +69,10 @@ export class SendMessageDto {
   targetLanguage?: SupportedLanguage;
 
   @IsOptional()
+  @IsString()
+  model?: string;
+
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ChatMessage)

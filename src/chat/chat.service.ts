@@ -1,6 +1,6 @@
 import { Injectable, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import { ChatMessage, ChatResponseDto, SupportedLanguage } from './dto/chat.dto';
 
 interface LanguageConfig {
@@ -8,7 +8,6 @@ interface LanguageConfig {
   nativeName: string;
   tutorDescription: string;
   pronunciationSystem: string;
-  pronunciationExample: string;
   exampleOriginal: string;
   exampleCorrection: string;
   exampleCorrectionPronunciation: string;
@@ -24,7 +23,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: 'English',
     tutorDescription: 'a professional British/American English speaking tutor',
     pronunciationSystem: 'IPA (International Phonetic Alphabet) with American English symbols',
-    pronunciationExample: '/ɡreɪt ˈɛfərt!/',
     exampleOriginal: 'I go to school yesterday',
     exampleCorrection: 'I went to school yesterday',
     exampleCorrectionPronunciation: '/aɪ wɛnt tu skul ˈjɛstərˌdeɪ/',
@@ -41,7 +39,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: '日本語',
     tutorDescription: 'a professional Japanese language tutor (日本語の先生)',
     pronunciationSystem: 'Romaji with pitch accent markers (High: ꜛ, Low: ꜜ) and Hiragana reading',
-    pronunciationExample: 'すꜛごꜜい (sugoi)',
     exampleOriginal: '昨日学校に行くました',
     exampleCorrection: '昨日学校に行きました',
     exampleCorrectionPronunciation: 'きꜛのꜜう がꜛっこꜜうに いꜛきまꜜした (kinou gakkou ni ikimashita)',
@@ -60,7 +57,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: '한국어',
     tutorDescription: 'a professional Korean language tutor (한국어 선생님)',
     pronunciationSystem: 'Revised Romanization with Hangul',
-    pronunciationExample: '잘했어요 (jalhaesseoyo)',
     exampleOriginal: '어제 학교에 가요',
     exampleCorrection: '어제 학교에 갔어요',
     exampleCorrectionPronunciation: '어제 학교에 갔어요 (eoje hakgyoe gasseoyo)',
@@ -79,7 +75,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: '中文',
     tutorDescription: 'a professional Mandarin Chinese tutor (中文老师)',
     pronunciationSystem: 'Pinyin with tone marks (1: ā, 2: á, 3: ǎ, 4: à)',
-    pronunciationExample: 'hěn bàng! (很棒!)',
     exampleOriginal: '我昨天去学校了',
     exampleCorrection: '我昨天去学校了',
     exampleCorrectionPronunciation: 'wǒ zuótiān qù xuéxiào le',
@@ -98,7 +93,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: 'Français',
     tutorDescription: 'a professional French language tutor (professeur de français)',
     pronunciationSystem: 'IPA with French phonemes and liaison markers',
-    pronunciationExample: '/tʁɛ bjɛ̃/ (très bien)',
     exampleOriginal: 'Je suis allé à école hier',
     exampleCorrection: "Je suis allé à l'école hier",
     exampleCorrectionPronunciation: "/ʒə sɥi‿ale a lekɔl jɛʁ/",
@@ -117,7 +111,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: 'Deutsch',
     tutorDescription: 'a professional German language tutor (Deutschlehrer)',
     pronunciationSystem: 'IPA with German phonemes',
-    pronunciationExample: '/zeːɐ̯ guːt/ (sehr gut)',
     exampleOriginal: 'Ich bin gestern in die Schule gegangen',
     exampleCorrection: 'Ich bin gestern in die Schule gegangen',
     exampleCorrectionPronunciation: '/ɪç bɪn ˈɡɛstɐn ɪn diː ˈʃuːlə ɡəˈɡaŋən/',
@@ -136,7 +129,6 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
     nativeName: 'Español',
     tutorDescription: 'a professional Spanish language tutor (profesor de español)',
     pronunciationSystem: 'IPA with Spanish phonemes',
-    pronunciationExample: '/ˈmui ˈbjen/ (muy bien)',
     exampleOriginal: 'Yo fui a la escuela ayer',
     exampleCorrection: 'Ayer fui a la escuela',
     exampleCorrectionPronunciation: '/aˈʝeɾ fwi a la esˈkwela/',
@@ -152,18 +144,32 @@ const LANGUAGE_CONFIGS: Record<SupportedLanguage, LanguageConfig> = {
   },
 };
 
-// List of Gemini models to try in order (fallback mechanism)
-const GEMINI_MODELS = [
+const GEMINI_MODELS_API = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+const FALLBACK_MODELS = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
   'gemini-3-flash-preview',
 ];
 
+const GENERATION_CONFIG = {
+  responseMimeType: 'application/json' as const,
+  temperature: 0.7,
+  maxOutputTokens: 1024,
+};
+
 @Injectable()
 export class ChatService implements OnModuleInit {
   private readonly logger = new Logger(ChatService.name);
   private genAI: GoogleGenerativeAI;
+  private apiKey: string;
   private currentModelIndex = 0;
+
+  private readonly systemPromptCache = new Map<SupportedLanguage, string>();
+  private readonly modelCache = new Map<string, GenerativeModel>();
+
+  private cachedModels: { name: string; displayName: string; description: string }[] | null = null;
+  private cacheExpiry = 0;
 
   constructor(private configService: ConfigService) {}
 
@@ -173,95 +179,170 @@ export class ChatService implements OnModuleInit {
       this.logger.error('GEMINI_API_KEY is not defined in environment variables');
       throw new Error('GEMINI_API_KEY is not defined in environment variables');
     }
+    this.apiKey = apiKey;
     this.genAI = new GoogleGenerativeAI(apiKey);
     this.logger.log('Gemini AI client initialized successfully');
+
+    for (const lang of Object.keys(LANGUAGE_CONFIGS) as SupportedLanguage[]) {
+      this.systemPromptCache.set(lang, this.buildSystemPrompt(lang));
+    }
+    this.logger.log(`Pre-cached system prompts for ${this.systemPromptCache.size} languages`);
+  }
+
+  async getAvailableModels(): Promise<{ name: string; displayName: string; description: string }[]> {
+    if (this.cachedModels && Date.now() < this.cacheExpiry) {
+      return this.cachedModels;
+    }
+
+    try {
+      const response = await fetch(`${GEMINI_MODELS_API}?key=${this.apiKey}`);
+      if (!response.ok) {
+        throw new Error(`Gemini API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      const models = (data.models || [])
+        .filter((m: any) =>
+          m.supportedGenerationMethods?.includes('generateContent'),
+        )
+        .map((m: any) => ({
+          name: m.name?.replace('models/', '') || '',
+          displayName: m.displayName || m.name || '',
+          description: m.description || '',
+        }))
+        .sort((a: any, b: any) => a.displayName.localeCompare(b.displayName));
+
+      this.cachedModels = models;
+      this.cacheExpiry = Date.now() + 5 * 60 * 1000;
+
+      this.logger.log(`Fetched ${models.length} available Gemini models`);
+      return models;
+    } catch (error) {
+      this.logger.error(`Failed to fetch models: ${error.message}`);
+      throw new HttpException(
+        'Failed to fetch available models from Gemini API',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  private getOrCreateModel(modelName: string, systemInstruction: string): GenerativeModel {
+    const cacheKey = `${modelName}::${systemInstruction.length}`;
+    let model = this.modelCache.get(cacheKey);
+    if (!model) {
+      model = this.genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction,
+        generationConfig: GENERATION_CONFIG,
+      });
+      this.modelCache.set(cacheKey, model);
+    }
+    return model;
+  }
+
+  private buildSystemPrompt(language: SupportedLanguage): string {
+    const c = LANGUAGE_CONFIGS[language];
+    const rules = c.specialRules.map((r, i) => `${i + 8}. ${r}`).join('\n');
+
+    return `You are ${c.tutorDescription}. Help students improve their ${c.name} (${c.nativeName}) speaking skills.
+
+Respond with JSON: {"original","correction","correctionPronunciation","explanation","reply","pronunciation"}
+- original: exactly what the student said
+- correction: corrected version (same as original if perfect)
+- correctionPronunciation: ${c.pronunciationSystem} of the correction (REQUIRED)
+- explanation: brief correction explanation in ${c.name} (empty if perfect)
+- reply: conversational tutor reply in ${c.name}
+- pronunciation: ${c.pronunciationSystem} of your reply
+
+Rules:
+1. Return valid JSON only
+2. If perfect, set correction = original
+3. Be encouraging, reply in ${c.name}
+4. Keep natural conversation flow
+5. Correct the most important mistakes
+6. Use ${c.pronunciationSystem} for pronunciation fields
+7. correctionPronunciation is REQUIRED
+${rules}
+
+Example:
+{"original":"${c.exampleOriginal}","correction":"${c.exampleCorrection}","correctionPronunciation":"${c.exampleCorrectionPronunciation}","explanation":"${c.exampleExplanation}","reply":"${c.exampleReply}","pronunciation":"${c.examplePronunciation}"}`;
   }
 
   private getSystemPrompt(language: SupportedLanguage): string {
-    const config = LANGUAGE_CONFIGS[language];
-    
-    const specialRulesText = config.specialRules
-      .map((rule, index) => `${index + 8}. ${rule}`)
-      .join('\n');
-
-    return `You are ${config.tutorDescription}. Your role is to help students improve their ${config.name} (${config.nativeName}) speaking skills.
-
-When a student speaks, you must respond in a structured JSON format with the following fields:
-- original: The original text the student said (exactly as they said it)
-- correction: The corrected version if there are any grammar, pronunciation, or vocabulary mistakes
-- correctionPronunciation: ${config.pronunciationSystem} transcription of the CORRECTED sentence (this helps students practice the correct pronunciation)
-- explanation: A brief, friendly explanation of the correction (if any mistakes were found) - respond in ${config.name}
-- reply: Your natural, conversational reply as a tutor in ${config.name} (encourage the student, ask follow-up questions, or provide feedback)
-- pronunciation: ${config.pronunciationSystem} transcription of your reply
-
-IMPORTANT RULES:
-1. Always return valid JSON only, no additional text before or after
-2. If the student's ${config.name} is perfect, set "correction" to the same as "original" and "correctionPronunciation" to the pronunciation of the original
-3. Be encouraging and friendly in your "reply" - always respond in ${config.name}
-4. Focus on natural conversation flow in ${config.name}
-5. If the student makes multiple mistakes, correct the most important ones
-6. For pronunciation fields, always use ${config.pronunciationSystem}
-7. The "correctionPronunciation" field is REQUIRED - it helps students practice saying the sentence correctly
-${specialRulesText}
-
-Example response format:
-{
-  "original": "${config.exampleOriginal}",
-  "correction": "${config.exampleCorrection}",
-  "correctionPronunciation": "${config.exampleCorrectionPronunciation}",
-  "explanation": "${config.exampleExplanation}",
-  "reply": "${config.exampleReply}",
-  "pronunciation": "${config.examplePronunciation}"
-}`;
+    return this.systemPromptCache.get(language) || this.buildSystemPrompt(language);
   }
 
   private isRateLimitError(error: Error): boolean {
-    const message = error.message?.toLowerCase() || '';
-    return (
-      message.includes('429') ||
-      message.includes('too many requests') ||
-      message.includes('resource exhausted') ||
-      message.includes('quota') ||
-      message.includes('rate limit')
-    );
+    const msg = error.message?.toLowerCase() || '';
+    return msg.includes('429') || msg.includes('too many requests') ||
+      msg.includes('resource exhausted') || msg.includes('quota') || msg.includes('rate limit');
   }
 
-  private async generateWithFallback(prompt: string): Promise<string> {
-    const startIndex = this.currentModelIndex;
+  private buildChatHistory(chatHistory: ChatMessage[]): { role: string; parts: { text: string }[] }[] {
+    const recent = chatHistory.slice(-10);
+    const history: { role: string; parts: { text: string }[] }[] = [];
+
+    for (const msg of recent) {
+      if (msg.role === 'user') {
+        history.push({ role: 'user', parts: [{ text: msg.content }] });
+      } else if (msg.data?.reply) {
+        history.push({
+          role: 'model',
+          parts: [{ text: JSON.stringify({
+            original: msg.data.original || '',
+            correction: msg.data.correction || '',
+            correctionPronunciation: msg.data.correctionPronunciation || '',
+            explanation: msg.data.explanation || '',
+            reply: msg.data.reply,
+            pronunciation: msg.data.pronunciation || '',
+          }) }],
+        });
+      }
+    }
+
+    return history;
+  }
+
+  private async generateWithFallback(
+    systemPrompt: string,
+    chatHistory: { role: string; parts: { text: string }[] }[],
+    userMessage: string,
+    specificModel?: string,
+  ): Promise<string> {
+    const modelsToTry: string[] = [];
+
+    if (specificModel) {
+      modelsToTry.push(specificModel);
+    }
+
+    const start = this.currentModelIndex;
+    for (let i = 0; i < FALLBACK_MODELS.length; i++) {
+      const name = FALLBACK_MODELS[(start + i) % FALLBACK_MODELS.length];
+      if (name !== specificModel) modelsToTry.push(name);
+    }
+
     let lastError: Error | null = null;
 
-    // Try each model starting from current index
-    for (let i = 0; i < GEMINI_MODELS.length; i++) {
-      const modelIndex = (startIndex + i) % GEMINI_MODELS.length;
-      const modelName = GEMINI_MODELS[modelIndex];
-
+    for (const modelName of modelsToTry) {
       try {
         this.logger.log(`Trying model: ${modelName}`);
-        const model = this.genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const text = response.text();
+        const model = this.getOrCreateModel(modelName, systemPrompt);
+        const chat = model.startChat({ history: chatHistory });
+        const result = await chat.sendMessage(userMessage);
+        const text = result.response.text();
 
-        // Success! Update current model index for next request
-        this.currentModelIndex = modelIndex;
-        this.logger.log(`Successfully got response from model: ${modelName}`);
+        const fallbackIdx = FALLBACK_MODELS.indexOf(modelName);
+        if (fallbackIdx !== -1) this.currentModelIndex = fallbackIdx;
+
+        this.logger.log(`Response from ${modelName} (${text.length} chars)`);
         return text;
       } catch (error) {
         lastError = error;
         this.logger.warn(`Model ${modelName} failed: ${error.message}`);
-
-        if (this.isRateLimitError(error)) {
-          // Move to next model
-          this.logger.log(`Rate limit hit on ${modelName}, trying next model...`);
-          continue;
-        }
-
-        // For non-rate-limit errors, throw immediately
-        throw error;
+        if (!this.isRateLimitError(error)) throw error;
       }
     }
 
-    // All models failed
     this.logger.error('All Gemini models exhausted');
     throw lastError || new Error('All Gemini models are unavailable');
   }
@@ -270,52 +351,22 @@ Example response format:
     userMessage: string,
     chatHistory: ChatMessage[] = [],
     targetLanguage: SupportedLanguage = 'english',
+    model?: string,
   ): Promise<ChatResponseDto> {
     try {
       const systemPrompt = this.getSystemPrompt(targetLanguage);
+      const history = this.buildChatHistory(chatHistory);
 
-      // Build conversation history context
-      const recentHistory = chatHistory.slice(-10);
-      const historyContext =
-        recentHistory.length > 0
-          ? recentHistory
-              .map((msg) => {
-                if (msg.role === 'user') {
-                  return `Student: ${msg.content}`;
-                } else if (msg.data?.reply) {
-                  return `Tutor: ${msg.data.reply}`;
-                }
-                return '';
-              })
-              .filter(Boolean)
-              .join('\n')
-          : 'This is the start of the conversation.';
+      this.logger.debug(`Sending: "${userMessage.substring(0, 50)}..." [${targetLanguage}, ${model || 'auto'}]`);
 
-      const fullPrompt = `${systemPrompt}\n\nConversation History:\n${historyContext}\n\nStudent: ${userMessage}\n\nTutor (respond in JSON format):`;
+      const text = await this.generateWithFallback(systemPrompt, history, userMessage, model);
 
-      this.logger.debug(`Sending message to Gemini: ${userMessage.substring(0, 50)}...`);
-      
-      // Use fallback mechanism to get response
-      const text = await this.generateWithFallback(fullPrompt);
-
-      // Parse JSON response
       try {
-        const cleanedText = text
-          .replace(/```json\n?/g, '')
-          .replace(/```\n?/g, '')
-          .trim();
-        const jsonResponse = JSON.parse(cleanedText);
-
-        this.logger.debug('Successfully parsed Gemini response');
-        
-        return {
-          success: true,
-          data: jsonResponse,
-        };
+        const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+        const jsonResponse = JSON.parse(cleaned);
+        return { success: true, data: jsonResponse };
       } catch {
-        // Fallback if JSON parsing fails
-        this.logger.warn('Failed to parse JSON response, using fallback');
-        
+        this.logger.warn('JSON parse failed, using fallback response');
         return {
           success: true,
           data: {
@@ -329,26 +380,15 @@ Example response format:
         };
       }
     } catch (error) {
-      this.logger.error(`Error calling Gemini API: ${error.message}`, error.stack);
+      this.logger.error(`Gemini API error: ${error.message}`, error.stack);
 
       if (error.message?.includes('API_KEY')) {
-        throw new HttpException(
-          'Invalid API key configuration',
-          HttpStatus.INTERNAL_SERVER_ERROR,
-        );
+        throw new HttpException('Invalid API key configuration', HttpStatus.INTERNAL_SERVER_ERROR);
       }
-
       if (this.isRateLimitError(error)) {
-        throw new HttpException(
-          'All AI models are currently rate limited. Please try again later.',
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
+        throw new HttpException('All AI models are currently rate limited. Please try again later.', HttpStatus.TOO_MANY_REQUESTS);
       }
-
-      throw new HttpException(
-        `Failed to get AI response: ${error.message || 'Unknown error'}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
+      throw new HttpException(`Failed to get AI response: ${error.message || 'Unknown error'}`, HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 }

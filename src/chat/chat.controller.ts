@@ -24,9 +24,22 @@ export class ChatController {
     };
   }
 
+  @Get('models')
+  async getAvailableModels() {
+    const models = await this.chatService.getAvailableModels();
+    return { models };
+  }
+
   @Post('send')
   async sendMessage(@Body() dto: SendMessageDto): Promise<ChatResponseDto> {
-    this.logger.log(`Received message: ${dto.message.substring(0, 50)}... [Language: ${dto.targetLanguage || 'english'}]`);
-    return this.chatService.sendMessage(dto.message, dto.chatHistory, dto.targetLanguage || 'english');
+    this.logger.log(
+      `Received message: ${dto.message.substring(0, 50)}... [Language: ${dto.targetLanguage || 'english'}, Model: ${dto.model || 'auto'}]`,
+    );
+    return this.chatService.sendMessage(
+      dto.message,
+      dto.chatHistory,
+      dto.targetLanguage || 'english',
+      dto.model,
+    );
   }
 }
