@@ -1,6 +1,6 @@
 import { Injectable, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
+import { GoogleGenerativeAI, GenerativeModel, SchemaType, type ObjectSchema } from '@google/generative-ai';
 import { ChatMessage, ChatResponseDto, SupportedLanguage } from './dto/chat.dto';
 
 interface LanguageConfig {
@@ -152,11 +152,121 @@ const FALLBACK_MODELS = [
   'gemini-3-flash-preview',
 ];
 
+/** Forces Gemini to return exactly these keys as strings (avoids malformed / prose-wrapped JSON). */
+const TUTOR_RESPONSE_SCHEMA: ObjectSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    original: { type: SchemaType.STRING },
+    correction: { type: SchemaType.STRING },
+    correctionPronunciation: { type: SchemaType.STRING },
+    explanation: { type: SchemaType.STRING },
+    reply: { type: SchemaType.STRING },
+    pronunciation: { type: SchemaType.STRING },
+  },
+  required: [
+    'original',
+    'correction',
+    'correctionPronunciation',
+    'explanation',
+    'reply',
+    'pronunciation',
+  ],
+};
+
 const GENERATION_CONFIG = {
   responseMimeType: 'application/json' as const,
+  responseSchema: TUTOR_RESPONSE_SCHEMA,
   temperature: 0.7,
-  maxOutputTokens: 1024,
+  maxOutputTokens: 2048,
 };
+
+function stripCodeFences(raw: string): string {
+  return raw
+    .replace(/^\uFEFF/, '')
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .trim();
+}
+
+/** Extract first top-level `{ ... }` balancing braces and respecting string escapes. */
+function extractFirstJsonObject(s: string): string | null {
+  const start = s.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (c === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (c === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function parseJsonLenient(raw: string): Record<string, unknown> | null {
+  const cleaned = stripCodeFences(raw);
+  try {
+    const v = JSON.parse(cleaned);
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    const slice = extractFirstJsonObject(cleaned);
+    if (!slice) return null;
+    try {
+      const v = JSON.parse(slice);
+      return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function asString(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (v == null) return '';
+  return String(v);
+}
+
+function flattenReplyIfNestedJson(data: Record<string, unknown>): Record<string, unknown> {
+  const reply = asString(data.reply).trim();
+  if (!reply.startsWith('{') || !reply.includes('"reply"')) return data;
+  try {
+    const inner = JSON.parse(reply) as Record<string, unknown>;
+    if (inner && typeof inner === 'object' && typeof inner.reply === 'string') {
+      return { ...data, ...inner };
+    }
+  } catch {
+    /* keep outer */
+  }
+  return data;
+}
+
+function normalizeTutorPayload(parsed: Record<string, unknown>, userMessage: string): ChatResponseDto['data'] {
+  const flat = flattenReplyIfNestedJson(parsed);
+  return {
+    original: asString(flat.original) || userMessage,
+    correction: asString(flat.correction) || userMessage,
+    correctionPronunciation: asString(flat.correctionPronunciation),
+    explanation: asString(flat.explanation),
+    reply: asString(flat.reply),
+    pronunciation: asString(flat.pronunciation),
+  };
+}
 
 @Injectable()
 export class ChatService implements OnModuleInit {
@@ -361,24 +471,30 @@ Example:
 
       const text = await this.generateWithFallback(systemPrompt, history, userMessage, model);
 
-      try {
-        const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-        const jsonResponse = JSON.parse(cleaned);
-        return { success: true, data: jsonResponse };
-      } catch {
-        this.logger.warn('JSON parse failed, using fallback response');
-        return {
-          success: true,
-          data: {
-            original: userMessage,
-            correction: userMessage,
-            correctionPronunciation: '',
-            explanation: '',
-            reply: text,
-            pronunciation: '',
-          },
-        };
+      const parsed = parseJsonLenient(text);
+      if (parsed) {
+        const data = normalizeTutorPayload(parsed, userMessage);
+        if (!data.reply.trim()) {
+          this.logger.warn('Parsed tutor JSON but reply was empty; using safe fallback');
+          data.reply =
+            'I had trouble finishing my reply. Please tap Regenerate to try again, or rephrase your message.';
+        }
+        return { success: true, data };
       }
+
+      this.logger.warn('JSON parse failed after lenient extraction; using fallback (raw length=%s)', text.length);
+      return {
+        success: true,
+        data: {
+          original: userMessage,
+          correction: userMessage,
+          correctionPronunciation: '',
+          explanation: '',
+          reply:
+            'I could not read the tutor response correctly. Please tap Regenerate to try again.',
+          pronunciation: '',
+        },
+      };
     } catch (error) {
       this.logger.error(`Gemini API error: ${error.message}`, error.stack);
 
